@@ -530,7 +530,7 @@ function loadImg(file){
 function loadVid(file){
   cancelAnim();
   // Clean up previous audio context
-  if(S.audioCtx){try{S.audioCtx.close();}catch(e){} S.audioCtx=null; S.audioSrc=null;}
+  if(S.audioCtx){try{S.audioCtx.close();}catch(e){} S.audioCtx=null; S.audioSrc=null; S.audioDest=null;}
   S.vidFile=file; S.imgEl=null; S.imgFile=null;
   S.offCanvas=null; S.vidBlob=null; S.vidPaused=false;
   const url=URL.createObjectURL(file);
@@ -542,17 +542,7 @@ function loadVid(file){
     document.getElementById('applyBtn').disabled=false;
     document.getElementById('dlBtn').classList.remove('vis');
     setBadge(`${v.videoWidth} × ${v.videoHeight} · ${fmtDur(v.duration)}`);
-    // Attach ended handler for preview loop
-    v.onended=()=>{
-      // freeze on last frame, show replay overlay
-      cancelAnim();
-      renderPrev();
-      const eo=document.getElementById('endedOverlay');
-      if(eo) eo.classList.add('vis');
-      const pb=document.getElementById('vplayBtn');
-      if(pb) pb.textContent='▶';
-      S.vidPaused=true;
-    };
+    v.onended=onPreviewEnded;
     v.play().catch(()=>{});
     S.vidPaused=false;
     const pb=document.getElementById('vplayBtn');
@@ -770,15 +760,19 @@ async function exportVid(){
 
   // ── Audio: capture from the video element ──
   let audioStream=null;
-  try{
-    const ac=new (window.AudioContext||window.webkitAudioContext)();
-    const src=ac.createMediaElementSource(vid);
-    const dest=ac.createMediaStreamDestination();
-    src.connect(dest);
-    src.connect(ac.destination); // keep speaker audio
-    audioStream=dest.stream;
-    S.audioCtx=ac; S.audioSrc=src;
-  }catch(e){ console.warn('Audio capture failed:',e); }
+  if(!S.audioCtx){
+    try{
+      const ac=new (window.AudioContext||window.webkitAudioContext)();
+      const src=ac.createMediaElementSource(vid);
+      const dest=ac.createMediaStreamDestination();
+      src.connect(dest);
+      src.connect(ac.destination); // keep speaker audio
+      audioStream=dest.stream;
+      S.audioCtx=ac; S.audioSrc=src; S.audioDest=dest;
+    }catch(e){ console.warn('Audio capture failed:',e); }
+  } else {
+    audioStream=S.audioDest?.stream||null;
+  }
 
   // ── Build combined stream (video canvas + audio) ──
   const videoStream=off.captureStream();
@@ -807,55 +801,57 @@ async function exportVid(){
   showProg('Exportando video');
   document.getElementById('applyBtn').disabled=true;
   cancelAnim();
-  vid.currentTime=0;
+
+  // Seek to start and wait
+  vid.pause();
+  await new Promise(res=>{
+    if(vid.currentTime===0){res();return;}
+    vid.onseeked=()=>{vid.onseeked=null;res();};
+    vid.currentTime=0;
+  });
 
   rec.start();
-
-  // Draw the very first frame before play() so there's no black start
   drawFrame(ctx,vid,w,h,top,bot);
 
-  // Use rVFC if available for frame-accurate export (no duplicate/dropped frames)
+  function onExportTime(){
+    if(!vid.duration) return;
+    drawFrame(ctx,vid,w,h,top,bot);
+    updProg(Math.min(100,Math.round(vid.currentTime/vid.duration*100)));
+    if(vid.currentTime>=vid.duration-0.05){
+      drawFrame(ctx,vid,w,h,top,bot);
+      vid.removeEventListener('timeupdate',onExportTime);
+      vid.onended=null;
+      setTimeout(()=>rec.stop(),150);
+    }
+  }
+  vid.onended=()=>{
+    drawFrame(ctx,vid,w,h,top,bot);
+    vid.removeEventListener('timeupdate',onExportTime);
+    vid.onended=null;
+    setTimeout(()=>rec.stop(),150);
+  };
+  vid.addEventListener('timeupdate',onExportTime);
+
   if(typeof vid.requestVideoFrameCallback==='function'){
     let done=false;
     function onExportFrame(){
       if(done) return;
       drawFrame(ctx,vid,w,h,top,bot);
-      const pct=vid.duration?Math.min(100,Math.round(vid.currentTime/vid.duration*100)):0;
-      updProg(pct);
       if(!vid.ended) vid.requestVideoFrameCallback(onExportFrame);
+      else done=true;
     }
-    vid.onended=()=>{
-      done=true;
-      drawFrame(ctx,vid,w,h,top,bot); // last frame
-      setTimeout(()=>rec.stop(),100);
-    };
     vid.requestVideoFrameCallback(onExportFrame);
-  } else {
-    // Fallback: RAF, deduplicate on timeupdate
-    let lastT=-1;
-    function onExportRaf(){
-      if(vid.ended) return;
-      if(vid.currentTime!==lastT){
-        lastT=vid.currentTime;
-        drawFrame(ctx,vid,w,h,top,bot);
-        const pct=vid.duration?Math.min(100,Math.round(vid.currentTime/vid.duration*100)):0;
-        updProg(pct);
-      }
-      requestAnimationFrame(onExportRaf);
-    }
-    vid.onended=()=>{ drawFrame(ctx,vid,w,h,top,bot); setTimeout(()=>rec.stop(),100); };
-    requestAnimationFrame(onExportRaf);
   }
 
   vid.play().catch(()=>{});
 
   rec.onstop=()=>{
+    vid.removeEventListener('timeupdate',onExportTime);
     S.vidBlob=new Blob(chunks,{type:mime});
     S.vidMime=mime;
     hideProg();
     document.getElementById('applyBtn').disabled=false;
     document.getElementById('dlBtn').classList.add('vis');
-    // Restore preview
     vid.currentTime=0;
     vid.play().catch(()=>{});
     S.vidPaused=false;
@@ -863,13 +859,7 @@ async function exportVid(){
     if(pb) pb.textContent='⏸';
     const eo=document.getElementById('endedOverlay');
     if(eo) eo.classList.remove('vis');
-    // Re-attach preview ended handler
-    vid.onended=()=>{
-      cancelAnim(); renderPrev();
-      if(eo) eo.classList.add('vis');
-      if(pb) pb.textContent='▶';
-      S.vidPaused=true;
-    };
+    vid.onended=onPreviewEnded;
     loopVid();
     showToast('Video listo — con audio ▶','success');
   };
@@ -917,31 +907,50 @@ function doCrop(){
 
 async function exportCropVid(){
   const t=S.cropTpl; const vid=S.vidEl; if(!t||!vid) return;
-  const ct=t.position!=='bottom'?t.topPx:0;
-  const cb=t.position!=='top'?t.bottomPx:0;
-  const newH=S.origH-ct-cb;
+  const cropTop=t.position!=='bottom'?t.topPx:0;
+  const cropBot=t.position!=='top'?t.bottomPx:0;
+  const newH=S.origH-cropTop-cropBot;
   if(newH<=0){showToast('El recorte excede el video','error');return;}
 
+  showProg('Exportando recorte');
+  document.getElementById('cropBtn').disabled=true;
+  cancelAnim();
+
+  // Reset video to start cleanly — wait for seek to settle
+  vid.pause();
+  await new Promise(res=>{
+    if(vid.currentTime===0){res();return;}
+    vid.onseeked=()=>{vid.onseeked=null;res();};
+    vid.currentTime=0;
+  });
+
+  // Canvas for offscreen render
   const off=document.createElement('canvas');
   off.width=S.origW; off.height=newH;
   const ctx=off.getContext('2d');
 
   function drawCrop(){
     ctx.clearRect(0,0,S.origW,newH);
-    ctx.drawImage(vid,0,ct,S.origW,newH,0,0,S.origW,newH);
+    ctx.drawImage(vid,0,cropTop,S.origW,newH,0,0,S.origW,newH);
   }
 
-  // ── Audio ──
+  // Audio — reuse existing AudioContext if already created for this vid element
+  // to avoid "already connected" error on second export
   let audioStream=null;
-  try{
-    const ac=new (window.AudioContext||window.webkitAudioContext)();
-    const src=ac.createMediaElementSource(vid);
-    const dest=ac.createMediaStreamDestination();
-    src.connect(dest);
-    src.connect(ac.destination);
-    audioStream=dest.stream;
-    S.audioCtx=ac; S.audioSrc=src;
-  }catch(e){console.warn('Audio capture failed:',e);}
+  if(!S.audioCtx){
+    try{
+      const ac=new (window.AudioContext||window.webkitAudioContext)();
+      const src=ac.createMediaElementSource(vid);
+      const dest=ac.createMediaStreamDestination();
+      src.connect(dest);
+      src.connect(ac.destination);
+      audioStream=dest.stream;
+      S.audioCtx=ac; S.audioSrc=src; S.audioDest=dest;
+    }catch(e){console.warn('Audio capture failed:',e);}
+  } else {
+    // reuse existing dest stream
+    audioStream=S.audioDest?.stream||null;
+  }
 
   const videoStream=off.captureStream();
   const tracks=[...videoStream.getVideoTracks()];
@@ -955,59 +964,76 @@ async function exportCropVid(){
   const chunks=[];
   rec.ondataavailable=e=>{if(e.data.size>0)chunks.push(e.data);};
 
-  showProg('Exportando recorte');
-  document.getElementById('cropBtn').disabled=true;
-  cancelAnim();
-  vid.currentTime=0;
-  rec.start();
-  drawCrop();
-
   const eo=document.getElementById('endedOverlay');
   const pb=document.getElementById('vplayBtn');
 
-  if(typeof vid.requestVideoFrameCallback==='function'){
-    let done=false;
-    function onFrame(){
-      if(done) return;
-      drawCrop();
-      const pct=vid.duration?Math.min(100,Math.round(vid.currentTime/vid.duration*100)):0;
-      updProg(pct);
-      if(!vid.ended) vid.requestVideoFrameCallback(onFrame);
-    }
-    vid.onended=()=>{ done=true; drawCrop(); setTimeout(()=>rec.stop(),100); };
-    vid.requestVideoFrameCallback(onFrame);
-  } else {
-    let lastT=-1;
-    function onRaf(){
-      if(vid.ended) return;
-      if(vid.currentTime!==lastT){ lastT=vid.currentTime; drawCrop(); updProg(vid.duration?Math.min(100,Math.round(vid.currentTime/vid.duration*100)):0); }
-      requestAnimationFrame(onRaf);
-    }
-    vid.onended=()=>{ drawCrop(); setTimeout(()=>rec.stop(),100); };
-    requestAnimationFrame(onRaf);
-  }
-
-  vid.play().catch(()=>{});
-
   rec.onstop=()=>{
+    // Remove listeners before doing anything else
+    vid.removeEventListener('timeupdate',onTime);
+    vid.onended=null;
     S.vidBlob=new Blob(chunks,{type:mime}); S.vidMime=mime;
     hideProg();
     document.getElementById('cropBtn').disabled=false;
     document.getElementById('dlBtn').classList.add('vis');
+    // Restore preview playback
     vid.currentTime=0;
     vid.play().catch(()=>{});
     S.vidPaused=false;
     if(pb) pb.textContent='⏸';
     if(eo) eo.classList.remove('vis');
-    vid.onended=()=>{
-      cancelAnim(); renderPrev();
-      if(eo) eo.classList.add('vis');
-      if(pb) pb.textContent='▶';
-      S.vidPaused=true;
-    };
+    vid.onended=onPreviewEnded;
     loopVid();
     showToast('Recorte listo — con audio ▶','success');
   };
+
+  // Use timeupdate to detect end — more reliable than onended during recording
+  function onTime(){
+    if(!vid.duration) return;
+    drawCrop();
+    updProg(Math.min(100,Math.round(vid.currentTime/vid.duration*100)));
+    // Stop when we're within one frame of the end
+    if(vid.currentTime >= vid.duration - 0.05){
+      drawCrop();
+      vid.removeEventListener('timeupdate',onTime);
+      vid.onended=null;
+      setTimeout(()=>rec.stop(),150);
+    }
+  }
+
+  // Also keep onended as safety net
+  vid.onended=()=>{
+    drawCrop();
+    vid.removeEventListener('timeupdate',onTime);
+    vid.onended=null;
+    setTimeout(()=>rec.stop(),150);
+  };
+
+  vid.addEventListener('timeupdate',onTime);
+
+  // Use rVFC for frame-accurate drawing if available
+  if(typeof vid.requestVideoFrameCallback==='function'){
+    let exportDone=false;
+    function onExportFrame(){
+      if(exportDone) return;
+      drawCrop();
+      if(!vid.ended) vid.requestVideoFrameCallback(onExportFrame);
+      else exportDone=true;
+    }
+    vid.requestVideoFrameCallback(onExportFrame);
+  }
+
+  rec.start();
+  drawCrop(); // first frame immediately
+  vid.play().catch(()=>{});
+}
+
+function onPreviewEnded(){
+  cancelAnim(); renderPrev();
+  const eo=document.getElementById('endedOverlay');
+  const pb=document.getElementById('vplayBtn');
+  if(eo) eo.classList.add('vis');
+  if(pb) pb.textContent='▶';
+  S.vidPaused=true;
 }
 
 
