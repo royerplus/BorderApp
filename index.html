@@ -613,44 +613,74 @@ function applyOrExport(){
 }
 
 // ── Video export ──
+
 async function exportVid(){
-  const vid=S.vidEl;if(!vid)return;
-  const{w,h,top,bot}=outDims();
-  const off=document.createElement('canvas');off.width=w;off.height=h;
-  const ctx=off.getContext('2d');
-  const mimes=['video/webm;codecs=vp9','video/webm;codecs=vp8','video/webm','video/mp4'];
-  const mime=mimes.find(m=>MediaRecorder.isTypeSupported(m))||'video/webm';
-  const fps=60;
-  const bitrate=Math.min(Math.round(w*h*fps*0.4),80_000_000);
-  const stream=off.captureStream(fps);
-  const rec=new MediaRecorder(stream,{mimeType:mime,videoBitsPerSecond:bitrate});
-  const chunks=[];
-  rec.ondataavailable=e=>{if(e.data.size>0)chunks.push(e.data);};
-  showProg('Exportando video');
-  document.getElementById('applyBtn').disabled=true;
-  cancelAnim();vid.pause();vid.currentTime=0;
-  rec.start();
-  const dur=S.vidEl.duration,step=1/fps;let t2=0;
-  return new Promise(res=>{
-    rec.onstop=()=>{
-      S.vidBlob=new Blob(chunks,{type:mime});S.vidMime=mime;
-      hideProg();document.getElementById('applyBtn').disabled=false;
-      document.getElementById('dlBtn').classList.add('vis');
-      vid.play().catch(()=>{});loopVid();
-      showToast('Video listo ▶','success');res();
-    };
-    function next(){
-      if(t2>dur+0.01){rec.stop();return;}
-      vid.currentTime=t2;
-      vid.onseeked=()=>{
-        drawFrame(ctx,vid,w,h,top,bot);
-        updProg(Math.min(100,Math.round(t2/dur*100)));
-        t2+=step;setTimeout(next,0);
-      };
-    }
-    next();
+  const vid = S.vidEl;
+  if(!vid) return;
+
+  const {w,h,top,bot} = outDims();
+
+  const off = document.createElement('canvas');
+  off.width = w;
+  off.height = h;
+  const ctx = off.getContext('2d');
+
+  const mimes=[
+    'video/webm;codecs=vp9',
+    'video/webm;codecs=vp8',
+    'video/webm',
+    'video/mp4'
+  ];
+
+  const mime = mimes.find(m=>MediaRecorder.isTypeSupported(m)) || 'video/webm';
+
+  const fps = 60;
+  const bitrate = Math.min(Math.round(w*h*fps*0.4),80_000_000);
+
+  const stream = off.captureStream(fps);
+  const rec = new MediaRecorder(stream,{
+    mimeType:mime,
+    videoBitsPerSecond:bitrate
   });
+
+  const chunks=[];
+  rec.ondataavailable=e=>{
+    if(e.data.size>0) chunks.push(e.data);
+  };
+
+  showProg('Exportando video');
+
+  cancelAnim();
+  vid.currentTime = 0;
+
+  rec.start();
+
+  function draw(){
+    if(vid.paused || vid.ended) return;
+    drawFrame(ctx,vid,w,h,top,bot);
+    requestAnimationFrame(draw);
+  }
+
+  vid.play();
+  draw();
+
+  vid.onended = ()=>{
+    rec.stop();
+  };
+
+  rec.onstop = ()=>{
+    S.vidBlob = new Blob(chunks,{type:mime});
+    S.vidMime = mime;
+
+    hideProg();
+    document.getElementById('dlBtn').classList.add('vis');
+
+    loopVid();
+
+    showToast('Video listo ▶','success');
+  };
 }
+
 
 // ── Crop ──
 function refreshCrop(){
