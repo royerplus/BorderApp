@@ -200,10 +200,23 @@ main{display:grid;grid-template-columns:365px 1fr;height:calc(100vh - 73px)}
 .es-ico{font-size:60px;animation:fi 4s ease-in-out infinite}
 .es-txt{font-family:'Cormorant Garamond',serif;font-size:19px;color:var(--ts);letter-spacing:3px;font-style:italic}
 .es-sub{font-size:10px;color:var(--tm);letter-spacing:2px}
-.abar{position:absolute;bottom:22px;display:flex;gap:10px}
+.abar{position:absolute;bottom:22px;display:flex;gap:10px;align-items:center}
 .bdl{background:linear-gradient(135deg,rgba(201,168,76,.15),rgba(201,168,76,.07));border:1px solid rgba(201,168,76,.4);color:var(--gold);font-family:'Montserrat',sans-serif;font-size:10px;font-weight:600;letter-spacing:2px;text-transform:uppercase;padding:12px 26px;cursor:pointer;transition:var(--tr);border-radius:var(--r);display:none;align-items:center;gap:7px}
 .bdl:hover{box-shadow:0 0 22px rgba(201,168,76,.2)}.bdl.vis{display:flex}
 .iinfo{position:absolute;top:13px;right:13px;background:rgba(0,0,0,.8);border:1px solid rgba(201,168,76,.15);border-radius:2px;padding:5px 10px;font-size:9px;letter-spacing:1.5px;color:var(--tm);display:none}.iinfo.vis{display:block}
+
+/* Video controls */
+.vctrl{position:absolute;bottom:62px;left:50%;transform:translateX(-50%);display:none;align-items:center;gap:10px;background:rgba(0,0,0,.7);border:1px solid rgba(201,168,76,.2);border-radius:var(--r);padding:8px 16px;backdrop-filter:blur(10px)}
+.vctrl.vis{display:flex}
+.vplay{background:none;border:1px solid rgba(201,168,76,.4);color:var(--gold);width:32px;height:32px;border-radius:50%;cursor:pointer;font-size:14px;display:flex;align-items:center;justify-content:center;transition:var(--tr);flex-shrink:0}
+.vplay:hover{background:rgba(201,168,76,.15);border-color:var(--gold)}
+.vpbar{width:160px;height:2px;background:rgba(201,168,76,.15);border-radius:2px;cursor:pointer;position:relative;flex-shrink:0}
+.vpfill{height:100%;background:linear-gradient(90deg,var(--gold-dim),var(--gold));border-radius:2px;width:0%;pointer-events:none}
+.vptime{font-size:9px;color:var(--ts);letter-spacing:1px;white-space:nowrap;min-width:64px;text-align:right}
+/* Ended overlay on canvas */
+.vid-ended-overlay{position:absolute;inset:0;background:rgba(0,0,0,.5);display:none;align-items:center;justify-content:center;cursor:pointer;transition:opacity .3s}
+.vid-ended-overlay.vis{display:flex}
+.vid-ended-overlay svg{width:52px;height:52px;fill:var(--gold);opacity:.9;filter:drop-shadow(0 0 12px rgba(201,168,76,.6))}
 
 /* Progress */
 .prog{position:absolute;inset:0;background:rgba(0,0,0,.88);display:none;flex-direction:column;align-items:center;justify-content:center;gap:18px;z-index:50;backdrop-filter:blur(4px)}
@@ -365,12 +378,24 @@ main{display:grid;grid-template-columns:365px 1fr;height:calc(100vh - 73px)}
       <div class="es-txt">Sin archivo</div>
       <div class="es-sub">Carga una imagen o video</div>
     </div>
-    <div class="pframe" id="pf" style="display:none">
+    <div class="pframe" id="pf" style="display:none;position:relative">
       <canvas id="pc"></canvas>
+      <div class="vid-ended-overlay" id="endedOverlay" onclick="replayVid()">
+        <svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+      </div>
     </div>
   </div>
 
   <div class="iinfo" id="iinfo"></div>
+
+  <!-- Video preview controls -->
+  <div class="vctrl" id="vctrl">
+    <button class="vplay" id="vplayBtn" onclick="togglePlay()">▶</button>
+    <div class="vpbar" id="vpbar">
+      <div class="vpfill" id="vpfill"></div>
+    </div>
+    <span class="vptime" id="vptime">0:00 / 0:00</span>
+  </div>
 
   <div class="prog" id="prog">
     <div class="plbl" id="plbl">Procesando</div>
@@ -398,7 +423,8 @@ const S = {
   pos:'both', mode:'add',
   topPx:100, botPx:100, opa:1,
   offCanvas:null, vidBlob:null, vidMime:null,
-  cropTpl:null, raf:null
+  cropTpl:null, raf:null,
+  vidPaused:false
 };
 
 // ── Particles ──
@@ -496,17 +522,39 @@ function loadImg(file){
 function loadVid(file){
   cancelAnim();
   S.vidFile=file;S.imgEl=null;S.imgFile=null;
-  S.offCanvas=null;S.vidBlob=null;
+  S.offCanvas=null;S.vidBlob=null;S.vidPaused=false;
   const url=URL.createObjectURL(file);
   const v=document.getElementById('vel');
   S.vidEl=v;v.src=url;v.currentTime=0;
+  // Clear any previous ended handlers
+  v.onended=null;
   v.onloadedmetadata=()=>{
     S.origW=v.videoWidth;S.origH=v.videoHeight;
     showFrame();
     document.getElementById('applyBtn').disabled=false;
     document.getElementById('dlBtn').classList.remove('vis');
     setBadge(`${v.videoWidth} × ${v.videoHeight} · ${fmtDur(v.duration)}`);
+    // Show video controls
+    document.getElementById('vctrl').classList.add('vis');
+    document.getElementById('endedOverlay').classList.remove('vis');
+    // Seekbar click
+    document.getElementById('vpbar').onclick=e=>{
+      const rect=e.currentTarget.getBoundingClientRect();
+      const pct=(e.clientX-rect.left)/rect.width;
+      v.currentTime=pct*v.duration;
+      if(S.vidPaused){renderPrev();} // update still frame when paused
+    };
+    // Ended: freeze on last frame, show replay overlay
+    v.onended=()=>{
+      cancelAnim();
+      renderPrev(); // draw last frame
+      document.getElementById('endedOverlay').classList.add('vis');
+      document.getElementById('vplayBtn').textContent='▶';
+      S.vidPaused=true;
+    };
     v.play().catch(()=>{});
+    S.vidPaused=false;
+    document.getElementById('vplayBtn').textContent='⏸';
     loopVid();
     showToast('Video cargado ▶','success');
   };
@@ -514,8 +562,49 @@ function loadVid(file){
 
 function loopVid(){
   cancelAnim();
-  function loop(){if(S.vidEl&&S.media==='video'){renderPrev();S.raf=requestAnimationFrame(loop);}}
+  function loop(){
+    if(!S.vidEl||S.media!=='video') return;
+    // Always render current frame (works paused too for scrubbing)
+    if(!S.vidPaused) renderPrev();
+    updateVidProgress();
+    S.raf=requestAnimationFrame(loop);
+  }
   S.raf=requestAnimationFrame(loop);
+}
+
+function togglePlay(){
+  const v=S.vidEl; if(!v) return;
+  // If ended, replay
+  if(v.ended){ replayVid(); return; }
+  if(S.vidPaused){
+    v.play().catch(()=>{});
+    S.vidPaused=false;
+    document.getElementById('vplayBtn').textContent='⏸';
+    // Resume RAF loop for live rendering
+    loopVid();
+  } else {
+    v.pause();
+    S.vidPaused=true;
+    document.getElementById('vplayBtn').textContent='▶';
+    // Keep RAF alive so progress bar updates and scrubbing works
+  }
+}
+
+function replayVid(){
+  const v=S.vidEl; if(!v) return;
+  document.getElementById('endedOverlay').classList.remove('vis');
+  v.currentTime=0;
+  v.play().catch(()=>{});
+  S.vidPaused=false;
+  document.getElementById('vplayBtn').textContent='⏸';
+  loopVid();
+}
+
+function updateVidProgress(){
+  const v=S.vidEl; if(!v||!v.duration) return;
+  const pct=(v.currentTime/v.duration)*100;
+  document.getElementById('vpfill').style.width=pct+'%';
+  document.getElementById('vptime').textContent=`${fmtDur(v.currentTime)} / ${fmtDur(v.duration)}`;
 }
 function cancelAnim(){if(S.raf){cancelAnimationFrame(S.raf);S.raf=null;}}
 function fmtDur(s){const m=Math.floor(s/60);return `${m}:${Math.floor(s%60).toString().padStart(2,'0')}`;}
@@ -674,7 +763,14 @@ async function exportVid(){
 
     hideProg();
     document.getElementById('dlBtn').classList.add('vis');
+    document.getElementById('applyBtn').disabled=false;
 
+    // Restore preview: replay from start
+    vid.currentTime=0;
+    vid.play().catch(()=>{});
+    S.vidPaused=false;
+    document.getElementById('vplayBtn').textContent='⏸';
+    document.getElementById('endedOverlay').classList.remove('vis');
     loopVid();
 
     showToast('Video listo ▶','success');
@@ -735,30 +831,59 @@ async function exportCropVid(){
   const stream=off.captureStream(fps);
   const rec=new MediaRecorder(stream,{mimeType:mime,videoBitsPerSecond:bitrate});
   const chunks=[];rec.ondataavailable=e=>{if(e.data.size>0)chunks.push(e.data);};
+
   showProg('Exportando recorte');
   document.getElementById('cropBtn').disabled=true;
-  cancelAnim();vid.pause();vid.currentTime=0;rec.start();
-  const dur=vid.duration,step=1/fps;let t2=0;
-  return new Promise(res=>{
-    rec.onstop=()=>{
-      S.vidBlob=new Blob(chunks,{type:mime});S.vidMime=mime;
-      hideProg();document.getElementById('cropBtn').disabled=false;
-      document.getElementById('dlBtn').classList.add('vis');
-      vid.play().catch(()=>{});loopVid();
-      showToast('Video recortado listo ▶','success');res();
+  cancelAnim();
+
+  // Remove any previous ended handler, reset and play
+  vid.onended=null;
+  vid.currentTime=0;
+
+  rec.start();
+
+  function drawCropFrame(){
+    ctx.clearRect(0,0,S.origW,newH);
+    ctx.drawImage(vid,0,ct,S.origW,newH,0,0,S.origW,newH);
+  }
+
+  function loop(){
+    if(vid.paused||vid.ended) return;
+    drawCropFrame();
+    const pct=vid.duration?Math.min(100,Math.round(vid.currentTime/vid.duration*100)):0;
+    updProg(pct);
+    requestAnimationFrame(loop);
+  }
+
+  vid.onended=()=>{
+    drawCropFrame(); // capture last frame
+    rec.stop();
+  };
+
+  rec.onstop=()=>{
+    S.vidBlob=new Blob(chunks,{type:mime});S.vidMime=mime;
+    hideProg();document.getElementById('cropBtn').disabled=false;
+    document.getElementById('dlBtn').classList.add('vis');
+
+    // Restore preview
+    vid.currentTime=0;
+    vid.play().catch(()=>{});
+    S.vidPaused=false;
+    document.getElementById('vplayBtn').textContent='⏸';
+    document.getElementById('endedOverlay').classList.remove('vis');
+    // Re-attach ended handler for preview
+    vid.onended=()=>{
+      cancelAnim();renderPrev();
+      document.getElementById('endedOverlay').classList.add('vis');
+      document.getElementById('vplayBtn').textContent='▶';
+      S.vidPaused=true;
     };
-    function next(){
-      if(t2>dur+0.01){rec.stop();return;}
-      vid.currentTime=t2;
-      vid.onseeked=()=>{
-        ctx.clearRect(0,0,S.origW,newH);
-        ctx.drawImage(vid,0,ct,S.origW,newH,0,0,S.origW,newH);
-        updProg(Math.min(100,Math.round(t2/dur*100)));
-        t2+=step;setTimeout(next,0);
-      };
-    }
-    next();
-  });
+    loopVid();
+    showToast('Video recortado listo ▶','success');
+  };
+
+  vid.play().catch(()=>{});
+  loop();
 }
 
 // ── Download ──
@@ -850,9 +975,11 @@ function resetView(){
   document.getElementById('pf').style.display='none';
   document.getElementById('dlBtn').classList.remove('vis');
   document.getElementById('iinfo').classList.remove('vis');
+  document.getElementById('vctrl').classList.remove('vis');
+  document.getElementById('endedOverlay').classList.remove('vis');
   document.getElementById('applyBtn').disabled=true;
-  if(S.vidEl)S.vidEl.src='';
-  S.imgEl=null;S.vidFile=null;S.offCanvas=null;S.vidBlob=null;
+  if(S.vidEl){S.vidEl.src='';S.vidEl.onended=null;}
+  S.imgEl=null;S.vidFile=null;S.offCanvas=null;S.vidBlob=null;S.vidPaused=false;
 }
 function setBadge(t){const el=document.getElementById('iinfo');el.textContent=t;el.classList.add('vis');}
 let _tt;function showToast(m,tp='success'){const t=document.getElementById('toast');t.textContent=m;t.className=`toast ${tp} show`;clearTimeout(_tt);_tt=setTimeout(()=>t.classList.remove('show'),2800);}
